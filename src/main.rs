@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
@@ -64,7 +65,8 @@ fn main() -> Result<()> {
     let mut id = 1;
     for line in stdin.lock().lines() {
         let json_str = line.unwrap();
-        let message: Message = serde_json::from_str(&json_str)?;
+        let message: Message =
+            serde_json::from_str(&json_str).context("converting stdin to message")?;
 
         let response_body: Option<ResponseBody> = match message.body.message_type {
             MessageType::Init => Some(ResponseBody::InitOk(InitResponseBody {
@@ -90,9 +92,11 @@ fn main() -> Result<()> {
         let mut handle = stdout.lock();
         let resp = serde_json::to_string(&response);
 
-        handle.write_all(resp?.as_bytes())?;
-        handle.write_all(b"\n")?;
-        handle.flush()?;
+        handle
+            .write_all(resp?.as_bytes())
+            .context("writing response to stdout")?;
+        handle.write_all(b"\n").context("writing new line chr")?;
+        handle.flush().context("flushing it to the std out")?;
         id += 1;
     }
     Ok(())
