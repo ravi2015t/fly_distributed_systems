@@ -1,8 +1,10 @@
 use anyhow::Context;
+use anyhow::Error;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use std::io::Write;
+use std::thread;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Message {
@@ -63,41 +65,49 @@ enum MessageType {
 fn main() -> Result<()> {
     let stdin = std::io::stdin();
     let mut id = 1;
+    let mut threads: Vec<thread::JoinHandle<std::result::Result<(), Error>>> = vec![];
     for line in stdin.lock().lines() {
         let json_str = line.unwrap();
         let message: Message =
             serde_json::from_str(&json_str).context("converting stdin to message")?;
+        // drop(&stdin);
+        threads.push(thread::spawn(move || {
+            let response_body: Option<ResponseBody> = match message.body.message_type {
+                MessageType::Init => Some(ResponseBody::InitOk(InitResponseBody {
+                    message_type: MessageType::InitOk,
+                    in_reply_to: message.body.msg_id,
+                })),
+                MessageType::Echo => Some(ResponseBody::EchoOk(EchoResponseBody {
+                    message_type: MessageType::EchoOk,
+                    msg_id: id,
+                    in_reply_to: message.body.msg_id,
+                    echo: message.body.echo,
+                })),
+                MessageType::EchoOk => None,
+                MessageType::InitOk => None,
+            };
+            let response = Response {
+                src: message.dest,
+                dest: message.src,
+                body: response_body.unwrap(),
+            };
 
-        let response_body: Option<ResponseBody> = match message.body.message_type {
-            MessageType::Init => Some(ResponseBody::InitOk(InitResponseBody {
-                message_type: MessageType::InitOk,
-                in_reply_to: message.body.msg_id,
-            })),
-            MessageType::Echo => Some(ResponseBody::EchoOk(EchoResponseBody {
-                message_type: MessageType::EchoOk,
-                msg_id: id,
-                in_reply_to: message.body.msg_id,
-                echo: message.body.echo,
-            })),
-            MessageType::EchoOk => None,
-            MessageType::InitOk => None,
-        };
-        let response = Response {
-            src: message.dest,
-            dest: message.src,
-            body: response_body.unwrap(),
-        };
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            let resp = serde_json::to_string(&response);
 
-        let stdout = std::io::stdout();
-        let mut handle = stdout.lock();
-        let resp = serde_json::to_string(&response);
-
-        handle
-            .write_all(resp?.as_bytes())
-            .context("writing response to stdout")?;
-        handle.write_all(b"\n").context("writing new line chr")?;
-        handle.flush().context("flushing it to the std out")?;
+            handle
+                .write_all(resp?.as_bytes())
+                .context("writing response to stdout")?;
+            handle.write_all(b"\n").context("writing new line chr")?;
+            handle.flush().context("flushing it to the std out")?;
+            Ok(())
+        }));
         id += 1;
     }
+    for thread in threads {
+        thread.join().unwrap()?;
+    }
+
     Ok(())
 }
