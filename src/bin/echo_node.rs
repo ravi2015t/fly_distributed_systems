@@ -1,106 +1,100 @@
 use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use core::panic;
+use fly_exercise::protocol::*;
 use std::io::BufRead;
 use std::io::Write;
+use std::sync::Arc;
 use std::thread;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Message {
-    src: String,
-    dest: String,
-    body: Body,
+struct Node {
+    node_id: String,
+    node_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-enum ResponseBody {
-    EchoOk(EchoResponseBody),
-    InitOk(InitResponseBody),
-}
+impl Node {
+    pub fn new(body: InitBody) -> Self {
+        Node {
+            node_id: body.node_id,
+            node_ids: body.node_ids,
+        }
+    }
 
-#[derive(Debug, Clone, Serialize)]
-struct Response {
-    src: String,
-    dest: String,
-    body: ResponseBody,
-}
+    fn write(&self, message: Message) -> Result<()> {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        let resp = serde_json::to_string(&message);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Body {
-    #[serde(rename = "type")]
-    message_type: MessageType,
-    #[serde(default)]
-    msg_id: u32,
-    #[serde(default)]
-    echo: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct EchoResponseBody {
-    #[serde(rename = "type")]
-    message_type: MessageType,
-    msg_id: u32,
-    in_reply_to: u32,
-    echo: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct InitResponseBody {
-    #[serde(rename = "type")]
-    message_type: MessageType,
-    in_reply_to: u32,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum MessageType {
-    Echo,
-    EchoOk,
-    Init,
-    InitOk,
+        handle
+            .write_all(resp?.as_bytes())
+            .context("writing response to stdout")?;
+        handle.write_all(b"\n").context("writing new line chr")?;
+        handle.flush().context("flushing it to the std out")?;
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
     let stdin = std::io::stdin();
+    let mut first_message = String::new();
+    stdin
+        .lock()
+        .read_line(&mut first_message)
+        .context("reading first message from std input")?;
+
+    let init_message: Message =
+        serde_json::from_str(&first_message).context("converting stdin to message")?;
+
+    let init_body = match init_message.body {
+        MessageType::Init(body) => Some(body),
+        _ => None,
+    };
+    if init_body.is_none() {
+        panic!("First message should be Init")
+    }
+    let init_body = init_body.unwrap();
+
+    let msg_id = init_body.msg_id;
+    let node = Node::new(init_body);
+
+    let response = Message {
+        src: init_message.dest,
+        dest: init_message.src,
+        body: MessageType::InitOk(InitResponseBody {
+            in_reply_to: msg_id,
+        }),
+    };
+
+    node.write(response)
+        .context("Writing init ok message to std out")?;
+
+    let node = Arc::new(node);
     let mut id = 1;
     let mut threads: Vec<thread::JoinHandle<std::result::Result<(), Error>>> = vec![];
+    let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let json_str = line.unwrap();
+
+        let node = node.clone();
         let message: Message =
             serde_json::from_str(&json_str).context("converting stdin to message")?;
-        // drop(&stdin);
         threads.push(thread::spawn(move || {
-            let response_body: Option<ResponseBody> = match message.body.message_type {
-                MessageType::Init => Some(ResponseBody::InitOk(InitResponseBody {
-                    message_type: MessageType::InitOk,
-                    in_reply_to: message.body.msg_id,
-                })),
-                MessageType::Echo => Some(ResponseBody::EchoOk(EchoResponseBody {
-                    message_type: MessageType::EchoOk,
+            let response_body: Option<MessageType> = match message.body {
+                MessageType::Echo(body) => Some(MessageType::EchoOk(EchoResponseBody {
                     msg_id: id,
-                    in_reply_to: message.body.msg_id,
-                    echo: message.body.echo,
+                    in_reply_to: body.msg_id,
+                    echo: body.echo,
                 })),
-                MessageType::EchoOk => None,
-                MessageType::InitOk => None,
+                _ => None,
             };
-            let response = Response {
+            let response = Message {
                 src: message.dest,
                 dest: message.src,
                 body: response_body.unwrap(),
             };
 
-            let stdout = std::io::stdout();
-            let mut handle = stdout.lock();
-            let resp = serde_json::to_string(&response);
-
-            handle
-                .write_all(resp?.as_bytes())
-                .context("writing response to stdout")?;
-            handle.write_all(b"\n").context("writing new line chr")?;
-            handle.flush().context("flushing it to the std out")?;
+            node.write(response).context("Writing to stdout")?;
             Ok(())
         }));
         id += 1;
@@ -108,6 +102,5 @@ fn main() -> Result<()> {
     for thread in threads {
         thread.join().unwrap()?;
     }
-
     Ok(())
 }
