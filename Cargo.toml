@@ -11,5 +11,5 @@ serde = {version = "1", features = ["derive"]}
 serde_json = "1"
 
 [[bin]]
-name = "echo_node"
-path = "src/bin/echo_node.rs"
+name = "broadcast"
+path = "src/bin/broadcast.rs"
