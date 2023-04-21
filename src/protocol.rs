@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Message {
@@ -48,7 +48,7 @@ pub struct MessageResponseBody {
 }
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 pub struct ReadResponseBody {
-    pub messages: Vec<u32>,
+    pub messages: HashSet<u32>,
     pub in_reply_to: u32,
 }
 
@@ -57,6 +57,15 @@ pub struct InitResponseBody {
     pub in_reply_to: u32,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+pub struct GossipBody {
+    pub messages: HashSet<u32>,
+    pub msg_id: u32,
+}
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+pub struct GossipResponseBody {
+    pub in_reply_to: u32,
+}
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
@@ -71,6 +80,8 @@ pub enum MessageType {
     ReadOk(ReadResponseBody),
     Topology(TopologyBody),
     TopologyOk(MessageResponseBody),
+    Gossip(GossipBody),
+    GossipOk(GossipResponseBody),
 }
 
 #[cfg(test)]

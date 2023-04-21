@@ -4,17 +4,20 @@ use anyhow::Result;
 use core::panic;
 use fly_exercise::protocol::*;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::io::Write;
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 struct Node {
     node_id: String,
     node_ids: Vec<String>,
     topology: HashMap<String, Vec<String>>,
-    messages: Vec<u32>,
+    messages: HashSet<u32>,
 }
 
 impl Node {
@@ -23,7 +26,7 @@ impl Node {
             node_id: body.node_id,
             node_ids: body.node_ids,
             topology: HashMap::new(),
-            messages: vec![],
+            messages: HashSet::new(),
         }
     }
 
@@ -43,7 +46,6 @@ impl Node {
 
 fn main() -> Result<()> {
     let stdin = std::io::stdin();
-    dbg!("Got init message");
     let mut first_message = String::new();
     stdin
         .lock()
@@ -72,16 +74,60 @@ fn main() -> Result<()> {
             in_reply_to: msg_id,
         }),
     };
-    dbg!("Got init message");
     node.write(response)
         .context("Writing init ok message to std out")?;
 
     let node = Arc::new(Mutex::new(node));
+
+    //thread to take care of gossip
+
     let mut id = 2;
+    let n = Arc::clone(&node);
+    let (tx, rx) = channel();
+    let gossip_thread: thread::JoinHandle<std::result::Result<(), Error>> =
+        thread::spawn(move || {
+            let park_timeout = Duration::from_millis(500);
+            let mut terminated = false;
+
+            while !terminated {
+                if rx.try_recv().is_ok() {
+                    terminated = true;
+                } else {
+                    thread::park_timeout(park_timeout);
+
+                    let node = n.lock().unwrap();
+                    let neighbors = node
+                        .topology
+                        .get(&node.node_id)
+                        .context("Topology for current node is not available")
+                        .unwrap();
+                    for node_id in neighbors {
+                        let gossip_body = MessageType::Gossip(GossipBody {
+                            messages: node.messages.clone(),
+                            msg_id: id,
+                        });
+
+                        let gossip = Message {
+                            src: node.node_id.to_owned(),
+                            dest: node_id.to_owned(),
+                            body: gossip_body,
+                        };
+                        node.write(gossip)
+                            .context("Writing gossip message to stdout")?;
+                        id += 1;
+                    }
+                }
+            }
+
+            Ok(())
+        });
+
+    //read input from stdin and process events
     let mut threads: Vec<thread::JoinHandle<std::result::Result<(), Error>>> = vec![];
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let json_str = line.unwrap();
+        // println!("Message received on std in {}", &json_str);
         let node = Arc::clone(&node);
         let message: Message =
             serde_json::from_str(&json_str).context("converting stdin to message")?;
@@ -89,7 +135,7 @@ fn main() -> Result<()> {
             let mut node = node.lock().unwrap();
             let response_body: Option<MessageType> = match message.body {
                 MessageType::Broadcast(body) => {
-                    node.messages.push(body.message);
+                    node.messages.insert(body.message);
                     Some(MessageType::BroadcastOk(MessageResponseBody {
                         msg_id: id,
                         in_reply_to: body.msg_id,
@@ -107,15 +153,25 @@ fn main() -> Result<()> {
                     in_reply_to: body.msg_id,
                     messages: node.messages.clone(),
                 })),
+
+                MessageType::Gossip(body) => {
+                    node.messages.extend(body.messages);
+
+                    Some(MessageType::GossipOk(GossipResponseBody {
+                        in_reply_to: body.msg_id,
+                    }))
+                }
                 _ => None,
             };
-            let response = Message {
-                src: message.dest,
-                dest: message.src,
-                body: response_body.unwrap(),
-            };
+            if response_body.is_some() {
+                let response = Message {
+                    src: message.dest,
+                    dest: message.src,
+                    body: response_body.unwrap(),
+                };
 
-            node.write(response).context("Writing to stdout")?;
+                node.write(response).context("Writing response to stdout")?;
+            }
             Ok(())
         }));
         id += 1;
@@ -123,5 +179,9 @@ fn main() -> Result<()> {
     for thread in threads {
         thread.join().unwrap()?;
     }
+
+    tx.send(()).context("terminate gossip").unwrap();
+    gossip_thread.join().unwrap()?;
+
     Ok(())
 }
